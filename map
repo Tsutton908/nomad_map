@@ -1,0 +1,394 @@
+const Map = () => {
+
+  // Global data store
+  const { isLoading, trip, setTrip, user, setIsLoading} = useGlobalContext();
+
+  // React ref component
+  const mapRef = useRef(null);
+
+  // boolean to determine if the map has been set to full screen or not
+  const [enlarged, setEnlarged] = useState(false)
+
+  // state that determines the general region to start the map on 
+  const [region, setRegion] = useState(null)
+  const [tripCoords, setTripCoords] = useState([])
+
+ // state for select events such as point of interest, saved place, and saved trip event
+  const [selectedPoi, setSelectedPoi] = useState(null);
+  const [selectedEvent, setSelectedEvent] = useState(null);
+  const [selectedPlace, setSelectedPlace] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+
+  // state for search query string
+  const [search, setSearch] = useState("")
+
+  // for current position marker
+  const [location, setLocation] = useState(null);
+  const [errorMsg, setErrorMsg] = useState(null);
+
+  // function converts image blob returned from maps api to base64 for storage and minimize api calls
+  const fetchImageAsBase64 = async (imageUrl) => {
+    try {
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+  
+      // Convert blob to Base64
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result); // This is the Base64 string
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch (error) {
+      console.error("Error fetching image:", error);
+      return null;
+    }
+  };
+
+  // click handler function, called when user clicks a point of interest on the map,
+  // get key information about location, displays to the user and provides key information for the 
+  // user if they decide to save the point of interest as a place/event within their trip
+  const handlePoiClick = async (event) => {
+    setSelectedPlace(null);
+    setSelectedEvent(null);
+
+    const poi = event.nativeEvent;
+
+    // call google maps api twice, once for place info, then another for image
+    try {
+      const API_KEY = env.mapsKey;
+      // only return:
+      // photos,
+      // rating
+      // types
+      const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${poi.placeId}&fields=photos,rating,types&key=${API_KEY}`;
+
+      const axiosInstance = axios.create({ timeout: 5000 }); // 5-second timeout
+      const placeResponse = await axiosInstance.get(url);
+
+      // get the image from the first photo returned from the place api call
+      const photoRef = `https://maps.googleapis.com/maps/api/place/photo?maxwidth=200&photoreference=${placeResponse.data.result.photos[0].photo_reference}&key=${API_KEY}
+
+      const photoReference = await fetchImageAsBase64(photoRef)
+
+      // set new POI state to current place information
+      setSelectedPoi({
+        name: poi.name,
+        latitude: poi.coordinate.latitude,
+        longitude: poi.coordinate.longitude,
+        placeId: poi.placeId,
+        photoRef: photoReference,
+        rating: placeResponse.data.result.rating.toString(),
+        type: placeResponse.data.result.types[0]
+      });
+    }  catch (err) {
+        console.log("Couldn't get image for poi", err);
+    }
+
+      mapRef.current?.animateToRegion(
+        {
+          latitude: poi.coordinate.latitude,
+          longitude: poi.coordinate.longitude,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.06,
+        },
+        1000 // Duration in milliseconds
+      );
+  };
+
+  // state management handler for when user specifically clicks on a event within a trip
+  const handleSelectEvent = (event) => {
+    setSelectedEvent(event);
+    setSelectedPoi(null);
+  }
+
+  // state management handler for when user specifically clicks to get rid of place info card
+  // resets all state back to base of null
+  const handleRemoveCard = () => {
+    setSelectedEvent(null);
+    setSelectedPoi(null);
+    setSelectedPlace(null);
+    setSuggestions([])
+  }
+
+  // shortend string retrieved from google maps api for place name / title
+  const shortenString = (input) => {
+    // Split the string by commas
+    const parts = input.split(','); 
+
+    if (parts.length > 2) {
+      // Join the first two parts and add ellipsis
+      return parts.slice(0, 2).join(','); 
+    }
+
+    // If there are 2 or fewer parts, return the original string
+    return input; 
+  }
+
+  // useEffect called only on render of component, get base information to populate map on first display
+  useEffect(() => {
+    if ( trip && trip.days != null && trip.days[0].events != null && trip.days[0].events.length > 1 ) {
+
+      const latitude = parseFloat(trip.days[0].events[1].latitude)
+      const longitude = parseFloat(trip.days[0].events[1].longitude)
+
+      setRegion({
+        latitude: longitude,
+        longitude: latitude,
+        latitudeDelta: 0.6,
+        longitudeDelta: 0.2
+      })
+
+      trip.days.forEach((day) => {
+        if ( day.events ) {
+          day.events.forEach((event) => {
+            setTripCoords((prevTripCoords) => [
+              ...prevTripCoords,
+              {
+                latitude: parseFloat(event.latitude), 
+                longitude: parseFloat(event.longitude),
+                type: event.type,
+                name: shortenString(event.location),
+                event: event
+              }
+            ]);
+          })
+        }
+      })
+    } else {
+      setRegion({
+        latitude: 37.78825,
+        longitude: -122.4324,
+        latitudeDelta: 0.0922,
+        longitudeDelta: 0.0421
+      })
+    }
+
+    // async function to request acces to GPS Coordinates if not already accessable
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setErrorMsg('Permission to access location was denied');
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({});
+      setLocation(location);
+    })();
+  }, [])
+
+  // return loading signal if global context is not ready yet
+  if ( !trip || !region || !location ) {
+    return (
+      <View>
+        <Text>Loading map...</Text>
+      </View>
+    )
+  }
+
+  // main UI returned from component
+  return (
+      <View style={[styles.container, enlarged && { padding: 0, position: 'absolute', height: '100%'}]}>
+        <SearchBar
+          placeholder="Type Here..."
+          onChangeText={(text) => {setSearch(text)}}
+          value={search}
+          lightTheme
+          round
+          containerStyle={{
+            backgroundColor: 'transparent',
+            borderTopWidth: 0,
+            borderBottomWidth: 0
+          }}
+          inputContainerStyle={ enlarged ? {
+            backgroundColor: 'white',
+            height: 30,
+            borderRadius: 15,
+            position: 'absolute',
+            zIndex: 200,
+            width: '100%',
+            height: 30,
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: 10,
+          } : {
+            borderRadius: 15,
+            height: 30,
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: 10,
+          }}
+          inputStyle={{
+            color: 'black',
+            fontSize: 12,
+            paddingVertical: 0
+          }}
+          returnKeyType="search"
+          onSubmitEditing={() => {
+            // Handle search action here
+            // fetchSuggestions(search)
+          }}
+        />
+      <View style={[styles.mapContainer, enlarged && styles.enlargedMap]}>
+        <MapView 
+          ref={mapRef}
+          style={styles.map} 
+          initialRegion={region}
+          onPoiClick={handlePoiClick}
+        >
+
+          {/* Markers for each event within a trip, and display relative path for travel */} 
+          {
+            tripCoords.map((tripEvent, index) => {
+              return (
+                <Marker 
+                  coordinate={
+                    {
+                      "latitude": tripEvent.longitude, 
+                      "longitude": tripEvent.latitude
+                    }
+                  }
+                  // title={tripEvent.name}
+                  key={tripEvent.latitude + index}
+                  // description={`Destination ${index + 1} - ${tripEvent.type}`}
+                  onPress={() => {
+                    setSelectedPlace(null);
+                    setSelectedPoi(null);
+                    handleSelectEvent(tripEvent)
+                  }}
+                />
+              )
+            })
+          }
+
+          {/* Marker for point of interest selection */}
+          {
+            selectedPoi && (
+              <Marker 
+                  coordinate={
+                    {
+                      "latitude": selectedPoi.latitude, 
+                      "longitude": selectedPoi.longitude
+                    }
+                  }
+                  key={selectedPoi.placeId}
+                  pinColor={primary}
+                />
+            )
+          }
+
+          {/* Marker for saved places */}
+          {
+            (trip.places && trip.places.length != 0) && (
+              trip.places.map((place, idx) => {
+                return (
+                  <Marker 
+                    coordinate={
+                      {
+                        "latitude": parseFloat(place.latitude), 
+                        "longitude": parseFloat(place.longitude)
+                      }
+                    }
+                    key={idx}
+                    pinColor={primaryLight}
+                    onPress={()=> {
+                      setSelectedEvent(null);
+                      setSelectedPoi(null);
+                      setSelectedPlace(place)
+                    }}
+                  />
+                )
+              })
+            )
+          }
+
+          {/* Current Location Marker */}
+          {
+            location && (
+              <Marker
+                coordinate={{
+                  "latitude": parseFloat(location.coords.latitude), 
+                  "longitude": parseFloat(location.coords.longitude)
+                }}
+                anchor={{ x: 0.5, y: 0.5 }} // Center the marker
+                title="You are here"
+              >
+                <View style={styles.marker}>
+                </View>
+              </Marker>
+            )
+          }
+
+          {/* Draw the polyline - Polyline for relative trip path */}
+          <Polyline 
+            coordinates={tripCoords.map((tripEvent) => ({
+              latitude: tripEvent.longitude,
+              longitude: tripEvent.latitude,
+            }))}
+            strokeColor={primary}
+            strokeWidth={8}
+            lineDashPattern={[5, 30]}
+            lineCap="round"
+            lineJoin="bevel"
+            geodesic={true}
+          />
+        </MapView>
+      </View>
+
+      {/* Since each selected pin type (POI, place, event) displays different information, each is rendered diffently AND seperatly */}
+
+      {/*  Display Place Card */}
+      {
+        selectedEvent && (
+          <View style={enlarged && { width: '100%', position: 'absolute', bottom: -140}}>
+            <MapPlaceCard event={selectedEvent} index={0} maxDest={tripCoords.length} enlarged={enlarged} handleRemove={handleRemoveCard} />
+          </View>
+        )
+      }
+
+      {/*  Display POI Card */}
+      {
+        selectedPoi && (
+          <View style={enlarged && { width: '100%', position: 'absolute', bottom: -140}}>
+            <MapPlaceCard poi={selectedPoi} enlarged={enlarged} handleRemove={handleRemoveCard} tripId={trip.id} />
+          </View>
+        )
+      }
+
+      {/*  Display trip event Card */}
+      {
+        selectedPlace && (
+          <View style={enlarged && { width: '100%', position: 'absolute', bottom: -140}}>
+            <MapPlaceCard place={selectedPlace} enlarged={enlarged} handleRemove={handleRemoveCard} tripId={trip.id} />
+          </View>
+        )
+      }
+
+      {/*  returned suggestions list for searhc query */}
+      {
+        suggestions.length != 0 && (
+          <View>
+            {
+              suggestions.map((poi) => {
+                return (
+                  <View style={enlarged && { width: '100%', position: 'absolute', bottom: -140}} key={poi.placeId}>
+                    <MapPlaceCard poi={poi} enlarged={enlarged} handleRemove={handleRemoveCard} tripId={trip.id} />
+                  </View>
+                )
+              })
+            }
+          </View>
+        )
+      }
+
+      {/*  icon to enlarge map to full screen */}
+      <TouchableOpacity style={enlarged ? styles.enlarged : styles.zoomOut} onPress={() => {setEnlarged(!enlarged)}}>
+        {
+          enlarged ? <MaterialIcons name="zoom-in-map" size={24} color={textPrimary} /> : <MaterialIcons name="zoom-out-map" size={24} color={textPrimary} />
+        }
+      </TouchableOpacity>
+    </View>
+  )
+}
+
+export default Map
